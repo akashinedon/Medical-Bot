@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 from src.prompt import *
 import os
+from threading import Lock
 
 
 app = Flask(__name__)
@@ -27,34 +28,44 @@ if not GEMINI_API_KEY:
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 
-embeddings = download_hugging_face_embeddings()
-
-index_name = "medical-chatbot" 
-# Embed each chunk and upsert the embeddings into your Pinecone index.
-docsearch = PineconeVectorStore.from_existing_index(
-    index_name=index_name,
-    embedding=embeddings
-)
+_rag_chain = None
+_init_lock = Lock()
 
 
+def get_rag_chain():
+    """Initialize RAG components on first use to keep app startup fast."""
+    global _rag_chain
+    if _rag_chain is not None:
+        return _rag_chain
 
+    with _init_lock:
+        if _rag_chain is not None:
+            return _rag_chain
 
-retriever = docsearch.as_retriever(search_type="similarity", search_kwargs={"k":3})
+        embeddings = download_hugging_face_embeddings()
+        index_name = "medical-chatbot"
+        docsearch = PineconeVectorStore.from_existing_index(
+            index_name=index_name,
+            embedding=embeddings,
+        )
+        retriever = docsearch.as_retriever(search_type="similarity", search_kwargs={"k": 3})
 
-chatModel = ChatGoogleGenerativeAI(
-    model=GEMINI_MODEL,
-    google_api_key=GEMINI_API_KEY,
-    temperature=0,
-)
-prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ]
-)
+        chatModel = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL,
+            google_api_key=GEMINI_API_KEY,
+            temperature=0,
+        )
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", "{input}"),
+            ]
+        )
 
-question_answer_chain = create_stuff_documents_chain(chatModel, prompt)
-rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+        question_answer_chain = create_stuff_documents_chain(chatModel, prompt)
+        _rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    return _rag_chain
 
 
 
@@ -63,12 +74,18 @@ def index():
     return render_template('chat.html')
 
 
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 
 @app.route("/get", methods=["GET", "POST"])
 def chat():
     msg = request.form["msg"]
     input = msg
     print(input)
+    rag_chain = get_rag_chain()
     response = rag_chain.invoke({"input": msg})
     print("Response : ", response["answer"])
     return str(response["answer"])
