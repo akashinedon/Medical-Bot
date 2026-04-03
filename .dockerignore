@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.swp
+*.tmp
+*.log
+.env
+.git/
+.github/
+.vscode/
+research/
+data/
+*.ipynb
