@@ -52,14 +52,28 @@ jobs:
         run: |
           echo "Disk usage before cleanup:"
           df -h
+          sudo du -sh /var/lib/docker 2>/dev/null || true
           docker stop medical-chatbot || true
           docker rm medical-chatbot || true
-          docker container prune -f || true
-          docker image prune -af || true
+          docker system prune -af --volumes || true
           docker builder prune -af || true
-          docker volume prune -f || true
+
+          # Clear OS and package caches/logs.
+          sudo apt-get clean || true
+          sudo apt-get autoclean || true
+          sudo rm -rf /var/cache/apt/archives/* || true
+          sudo rm -rf /var/log/*.gz /var/log/*.[0-9] || true
+          sudo journalctl --vacuum-time=1d || true
+          sudo rm -rf /tmp/* || true
+
+          # Clear GitHub runner diagnostics/temp data that can grow over time.
+          rm -rf /home/ubuntu/_diag/* || true
+          rm -rf /home/ubuntu/actions-runner/_work/_temp/* || true
+          rm -rf /home/ubuntu/actions-runner/_work/_actions/* || true
+
           echo "Disk usage after cleanup:"
           df -h
+          sudo du -sh /var/lib/docker 2>/dev/null || true
 
       - name: Run Docker Image to serve users
         env:
