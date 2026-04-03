@@ -37,6 +37,12 @@ jobs:
     needs: Continuous-Integration
     runs-on: self-hosted
     steps:
+      - name: Pre-clean runner workspace
+        run: |
+          rm -rf /home/ubuntu/_diag/* || true
+          rm -rf /home/ubuntu/actions-runner/_work/_temp/* || true
+          rm -rf /home/ubuntu/actions-runner/_work/_actions/* || true
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -53,6 +59,7 @@ jobs:
           echo "Disk usage before cleanup:"
           df -h
           sudo du -sh /var/lib/docker 2>/dev/null || true
+          docker system df || true
           docker stop medical-chatbot || true
           docker rm medical-chatbot || true
           docker system prune -af --volumes || true
@@ -71,9 +78,22 @@ jobs:
           rm -rf /home/ubuntu/actions-runner/_work/_temp/* || true
           rm -rf /home/ubuntu/actions-runner/_work/_actions/* || true
 
+          # If disk is still too low, reset Docker storage completely.
+          AVAILABLE_KB=$(df --output=avail / | tail -1 | tr -d ' ')
+          REQUIRED_KB=$((6 * 1024 * 1024))
+          if [ "${AVAILABLE_KB:-0}" -lt "$REQUIRED_KB" ]; then
+            echo "Low free space after prune; resetting /var/lib/docker"
+            sudo systemctl stop docker || true
+            sudo rm -rf /var/lib/docker || true
+            sudo mkdir -p /var/lib/docker || true
+            sudo systemctl start docker || true
+            sleep 3
+          fi
+
           echo "Disk usage after cleanup:"
           df -h
           sudo du -sh /var/lib/docker 2>/dev/null || true
+          docker system df || true
 
       - name: Run Docker Image to serve users
         env:
