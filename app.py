@@ -82,13 +82,22 @@ def health():
 
 @app.route("/get", methods=["GET", "POST"])
 def chat():
-    msg = request.form["msg"]
-    input = msg
-    print(input)
-    rag_chain = get_rag_chain()
-    response = rag_chain.invoke({"input": msg})
-    print("Response : ", response["answer"])
-    return str(response["answer"])
+    msg = request.form.get("msg") or request.args.get("msg")
+    if not msg:
+        return "Please enter a message.", 400
+
+    try:
+        print(msg)
+        rag_chain = get_rag_chain()
+        response = rag_chain.invoke({"input": msg})
+        answer = str(response.get("answer", "")).strip()
+        return answer or "I couldn't find a clear answer. Please rephrase your question."
+    except Exception:
+        app.logger.exception("Chat request failed")
+        return (
+            "I'm having trouble reaching the medical knowledge service right now. "
+            "Please try again in a moment."
+        ), 200
 
 
 
