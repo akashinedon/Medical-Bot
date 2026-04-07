@@ -30,6 +30,7 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
 _rag_chain = None
 _init_lock = Lock()
+_last_chat_error = None
 
 
 def get_rag_chain():
@@ -79,9 +80,15 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+@app.route("/debug/last_error")
+def last_error():
+    return jsonify({"last_chat_error": _last_chat_error}), 200
+
+
 
 @app.route("/get", methods=["GET", "POST"])
 def chat():
+    global _last_chat_error
     msg = request.form.get("msg") or request.args.get("msg")
     if not msg:
         return "Please enter a message.", 400
@@ -91,8 +98,10 @@ def chat():
         rag_chain = get_rag_chain()
         response = rag_chain.invoke({"input": msg})
         answer = str(response.get("answer", "")).strip()
+        _last_chat_error = None
         return answer or "I couldn't find a clear answer. Please rephrase your question."
-    except Exception:
+    except Exception as exc:
+        _last_chat_error = f"{type(exc).__name__}: {str(exc)[:500]}"
         app.logger.exception("Chat request failed")
         return (
             "I'm having trouble reaching the medical knowledge service right now. "
