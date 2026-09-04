@@ -20,15 +20,20 @@ def load_pdf_file(data):
 def filter_to_minimal_docs(docs: List[Document]) -> List[Document]:
     """
     Given a list of Document objects, return a new list of Document objects
-    containing only 'source' in metadata and the original page_content.
+    containing only 'source' and 'page' in metadata and the original page_content.
+
+    'page' is kept (on top of 'source') so the chatbot can show citations like
+    "Medical_book.pdf, page 42" instead of just the filename.
     """
     minimal_docs: List[Document] = []
     for doc in docs:
-        src = doc.metadata.get("source")
         minimal_docs.append(
             Document(
                 page_content=doc.page_content,
-                metadata={"source": src}
+                metadata={
+                    "source": doc.metadata.get("source"),
+                    "page": doc.metadata.get("page"),
+                },
             )
         )
     return minimal_docs

@@ -6,12 +6,16 @@ __pycache__/
 *.tmp
 *.log
 .env
+.env.*
 .git/
 .github/
 .vscode/
+.venv/
 research/
 # Keep data/chunks.json (needed at runtime for hybrid/BM25 search) but skip
 # the large source PDF - it's only needed offline, by store_index.py.
 data/*.pdf
 data/*.PDF
 *.ipynb
+Dockerfile
+.dockerignore

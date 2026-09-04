@@ -59,6 +59,17 @@
 			const messageList = document.getElementById("messageFormeight");
 			const chips = document.querySelectorAll(".prompt-chip");
 
+			// Sentinel the backend appends after the answer text so a single
+			// streamed response can carry both the visible reply and the
+			// structured citation data, without a second round trip.
+			const SOURCES_MARKER = "\n<<<SOURCES>>>";
+
+			// Conversation memory lives only in this tab (not localStorage, on
+			// purpose - we don't want symptom text lingering in browser storage).
+			// Sent back on every request so the bot can resolve follow-up
+			// questions like "what about its symptoms?".
+			let chatHistory = [];
+
 			function getTimeLabel() {
 				const date = new Date();
 				const h = String(date.getHours()).padStart(2, "0");
@@ -98,27 +109,148 @@
 				if (node) node.remove();
 			}
 
+			function createBotMessageRow() {
+				const row = document.createElement("article");
+				row.className = "message-row message-bot";
+
+				const bubble = document.createElement("div");
+				bubble.className = "bubble";
+
+				const meta = document.createElement("span");
+				meta.className = "meta";
+				meta.textContent = getTimeLabel();
+
+				row.appendChild(bubble);
+				row.appendChild(meta);
+				messageList.appendChild(row);
+				messageList.scrollTop = messageList.scrollHeight;
+
+				return { row, bubble, meta };
+			}
+
+			// Network chunks don't line up with our marker's byte boundaries, so a
+			// chunk can end mid-marker (e.g. "...answer.\n<<<SOURCE"). This finds
+			// the longest tail of rawText that could be the start of the marker,
+			// so we hold back rendering it until we know for sure either way.
+			function findPartialMarkerCut(rawText) {
+				const maxLen = Math.min(rawText.length, SOURCES_MARKER.length - 1);
+				for (let len = maxLen; len > 0; len--) {
+					if (SOURCES_MARKER.startsWith(rawText.slice(rawText.length - len))) {
+						return rawText.length - len;
+					}
+				}
+				return -1;
+			}
+
+			// While tokens are still streaming in, strip the (possibly
+			// partially-arrived) sources marker so it never flashes on screen.
+			function visibleTextOnly(rawText) {
+				const fullCut = rawText.indexOf(SOURCES_MARKER);
+				if (fullCut !== -1) return rawText.slice(0, fullCut);
+
+				const partialCut = findPartialMarkerCut(rawText);
+				return partialCut === -1 ? rawText : rawText.slice(0, partialCut);
+			}
+
+			function splitAnswerAndSources(rawText) {
+				const cut = rawText.indexOf(SOURCES_MARKER);
+				if (cut === -1) {
+					return { answer: rawText.trim(), sources: [] };
+				}
+				const answer = rawText.slice(0, cut).trim();
+				let sources = [];
+				try {
+					sources = JSON.parse(rawText.slice(cut + SOURCES_MARKER.length));
+				} catch (err) {
+					sources = [];
+				}
+				return { answer, sources };
+			}
+
+			function renderSources(row, sources) {
+				if (!sources || !sources.length) return;
+
+				const details = document.createElement("details");
+				details.className = "sources";
+
+				const summary = document.createElement("summary");
+				summary.textContent = `Sources (${sources.length})`;
+				details.appendChild(summary);
+
+				const list = document.createElement("ul");
+				sources.forEach((item) => {
+					const li = document.createElement("li");
+
+					const label = document.createElement("strong");
+					label.textContent = item.page ? `${item.source} · page ${item.page}` : item.source;
+
+					const snippet = document.createElement("p");
+					snippet.textContent = item.snippet || "";
+
+					li.appendChild(label);
+					li.appendChild(snippet);
+					list.appendChild(li);
+				});
+				details.appendChild(list);
+
+				row.row.insertBefore(details, row.meta);
+			}
+
 			async function sendMessage(rawText) {
 				appendMessage("user", rawText);
+				const historyForRequest = chatHistory.slice();
+				chatHistory.push({ role: "human", content: rawText });
+
 				showTyping();
 				sendBtn.disabled = true;
 
+				const botRow = createBotMessageRow();
+				botRow.row.style.display = "none"; // hidden until the first token arrives
+				let fullText = "";
+				let streamedAny = false;
+
 				try {
-					const body = new URLSearchParams({ msg: rawText });
 					const res = await fetch("/get", {
 						method: "POST",
-						headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
-						body,
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ msg: rawText, history: historyForRequest }),
 					});
-					const data = await res.text();
-					hideTyping();
-					appendMessage("bot", data || "I could not generate a response.");
+
+					if (!res.ok || !res.body) {
+						throw new Error("Bad response from server");
+					}
+
+					const reader = res.body.getReader();
+					const decoder = new TextDecoder();
+
+					while (true) {
+						const { value, done } = await reader.read();
+						if (done) break;
+
+						if (!streamedAny) {
+							hideTyping();
+							botRow.row.style.display = "";
+							streamedAny = true;
+						}
+
+						fullText += decoder.decode(value, { stream: true });
+						botRow.bubble.textContent = visibleTextOnly(fullText) || "…";
+						messageList.scrollTop = messageList.scrollHeight;
+					}
 				} catch (err) {
 					hideTyping();
-					appendMessage("bot", "Network issue detected. Please retry in a few seconds.");
+					botRow.row.style.display = "";
+					fullText = fullText || "Network issue detected. Please retry in a few seconds.";
 				} finally {
 					sendBtn.disabled = false;
 				}
+
+				const { answer, sources } = splitAnswerAndSources(fullText);
+				botRow.bubble.textContent = answer || "I could not generate a response.";
+				renderSources(botRow, sources);
+				messageList.scrollTop = messageList.scrollHeight;
+
+				chatHistory.push({ role: "ai", content: answer });
 			}
 
 			messageArea.addEventListener("submit", async function (event) {
