@@ -16,41 +16,56 @@
 		<div class="bg-orb orb-a"></div>
 		<div class="bg-orb orb-b"></div>
 		<div class="bg-grid"></div>
+		<div id="sidebarBackdrop" class="sidebar-backdrop"></div>
 
-		<main class="app-shell">
-			<header class="chat-header">
-				<div class="brand">
-					<img src="https://cdn-icons-png.flaticon.com/512/387/387569.png" alt="Medical bot" class="bot-avatar" />
-					<div>
-						<h1>Medical Chatbot</h1>
-						<p>Smart guidance for common health questions</p>
+		<div class="app-shell">
+			<aside id="sidebar" class="sidebar panel">
+				<div class="sidebar-header">
+					<span class="sidebar-title">Conversations</span>
+					<button type="button" id="newChatBtn" class="sidebar-new-btn">+ New</button>
+				</div>
+				<ul id="conversationList" class="conversation-list"></ul>
+				<div class="sidebar-footer">
+					<button type="button" id="clearAllBtn" class="sidebar-clear-btn">Clear all conversations</button>
+				</div>
+			</aside>
+
+			<main class="chat-panel panel">
+				<header class="chat-header">
+					<button type="button" id="sidebarToggle" class="sidebar-toggle" aria-label="Toggle conversations">☰</button>
+					<div class="brand">
+						<img src="https://cdn-icons-png.flaticon.com/512/387/387569.png" alt="Medical bot" class="bot-avatar" />
+						<div>
+							<h1>Medical Chatbot</h1>
+							<p>Smart guidance for common health questions</p>
+						</div>
 					</div>
+					<div class="status-pill">
+						<span class="status-dot"></span>
+						Online
+					</div>
+				</header>
+
+				<section id="messageFormeight" class="message-list" aria-live="polite"></section>
+
+				<div class="quick-prompts" id="quickPrompts">
+					<button type="button" class="prompt-chip" data-prompt="I have fever, what should I do first?">Fever steps</button>
+					<button type="button" class="prompt-chip" data-prompt="How can I reduce sore throat at home?">Sore throat</button>
+					<button type="button" class="prompt-chip" data-prompt="When should I see a doctor for headache?">Headache warning signs</button>
 				</div>
-				<div class="status-pill">
-					<span class="status-dot"></span>
-					Online
-				</div>
-			</header>
 
-			<section id="messageFormeight" class="message-list" aria-live="polite"></section>
-
-			<div class="quick-prompts">
-				<button type="button" class="prompt-chip" data-prompt="I have fever, what should I do first?">Fever steps</button>
-				<button type="button" class="prompt-chip" data-prompt="How can I reduce sore throat at home?">Sore throat</button>
-				<button type="button" class="prompt-chip" data-prompt="When should I see a doctor for headache?">Headache warning signs</button>
-			</div>
-
-			<form id="messageArea" class="composer" autocomplete="off">
-				<input
-					type="text"
-					id="text"
-					name="msg"
-					placeholder="Describe your symptoms..."
-					required
-				/>
-				<button type="submit" id="send">Send</button>
-			</form>
-		</main>
+				<form id="messageArea" class="composer" autocomplete="off">
+					<input
+						type="text"
+						id="text"
+						name="msg"
+						placeholder="Describe your symptoms..."
+						required
+					/>
+					<button type="submit" id="send">Send</button>
+				</form>
+			</main>
+		</div>
 
 		<script>
 			const messageArea = document.getElementById("messageArea");
@@ -58,17 +73,160 @@
 			const sendBtn = document.getElementById("send");
 			const messageList = document.getElementById("messageFormeight");
 			const chips = document.querySelectorAll(".prompt-chip");
+			const quickPrompts = document.getElementById("quickPrompts");
+
+			const sidebar = document.getElementById("sidebar");
+			const sidebarBackdrop = document.getElementById("sidebarBackdrop");
+			const sidebarToggle = document.getElementById("sidebarToggle");
+			const conversationList = document.getElementById("conversationList");
+			const newChatBtn = document.getElementById("newChatBtn");
+			const clearAllBtn = document.getElementById("clearAllBtn");
 
 			// Sentinel the backend appends after the answer text so a single
 			// streamed response can carry both the visible reply and the
 			// structured citation data, without a second round trip.
 			const SOURCES_MARKER = "\n<<<SOURCES>>>";
 
-			// Conversation memory lives only in this tab (not localStorage, on
-			// purpose - we don't want symptom text lingering in browser storage).
-			// Sent back on every request so the bot can resolve follow-up
-			// questions like "what about its symptoms?".
-			let chatHistory = [];
+			// --- Conversation persistence (localStorage) -----------------------
+			// Reversing an earlier "don't persist" privacy choice, on purpose,
+			// so conversations can be listed and resumed. Each conversation
+			// carries its own messages, so the history sent to the backend is
+			// always scoped to whichever conversation is active - conversations
+			// never share context with each other.
+			const STORAGE_KEY = "medbot_conversations_v1";
+			const MAX_CONVERSATIONS = 30;
+
+			function emptyStore() {
+				return { activeId: null, conversations: {} };
+			}
+
+			function loadStore() {
+				try {
+					const raw = localStorage.getItem(STORAGE_KEY);
+					if (!raw) return emptyStore();
+					const parsed = JSON.parse(raw);
+					if (!parsed || typeof parsed !== "object" || typeof parsed.conversations !== "object") {
+						return emptyStore();
+					}
+					return { activeId: parsed.activeId || null, conversations: parsed.conversations || {} };
+				} catch (err) {
+					return emptyStore();
+				}
+			}
+
+			let store = loadStore();
+
+			function saveStore() {
+				try {
+					const ids = Object.keys(store.conversations);
+					if (ids.length > MAX_CONVERSATIONS) {
+						const evictable = ids
+							.filter(function (id) {
+								return id !== store.activeId;
+							})
+							.sort(function (a, b) {
+								return (store.conversations[a].updatedAt || 0) - (store.conversations[b].updatedAt || 0);
+							});
+						const toRemove = evictable.slice(0, ids.length - MAX_CONVERSATIONS);
+						toRemove.forEach(function (id) {
+							delete store.conversations[id];
+						});
+					}
+					localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+				} catch (err) {
+					// Storage unavailable (private browsing) or quota exceeded -
+					// degrade silently. Chat still works for this page view,
+					// it just won't be resumable next time.
+				}
+			}
+
+			function getActiveConversation() {
+				return (store.activeId && store.conversations[store.activeId]) || null;
+			}
+
+			function historyForActiveConversation() {
+				const convo = getActiveConversation();
+				if (!convo) return [];
+				return convo.messages.map(function (m) {
+					return { role: m.role === "user" ? "human" : "ai", content: m.content };
+				});
+			}
+
+			function makeId() {
+				if (window.crypto && crypto.randomUUID) return "c_" + crypto.randomUUID();
+				return "c_" + Date.now() + "_" + Math.random().toString(16).slice(2);
+			}
+
+			function deriveTitle(text) {
+				const clean = text.trim().replace(/\s+/g, " ");
+				return clean.length <= 42 ? clean : clean.slice(0, 42).trim() + "…";
+			}
+
+			function relativeTime(ts) {
+				const minutes = Math.floor((Date.now() - ts) / 60000);
+				if (minutes < 1) return "Just now";
+				if (minutes < 60) return minutes + "m ago";
+				const hours = Math.floor(minutes / 60);
+				if (hours < 24) return hours + "h ago";
+				const days = Math.floor(hours / 24);
+				if (days === 1) return "Yesterday";
+				if (days < 7) return days + "d ago";
+				return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+			}
+
+			function renderSidebar() {
+				conversationList.innerHTML = "";
+				const items = Object.values(store.conversations).sort(function (a, b) {
+					return b.updatedAt - a.updatedAt;
+				});
+
+				if (!items.length) {
+					const empty = document.createElement("li");
+					empty.className = "conversation-empty";
+					empty.textContent = "No conversations yet — start one below.";
+					conversationList.appendChild(empty);
+					return;
+				}
+
+				items.forEach(function (conv) {
+					const li = document.createElement("li");
+					li.className = "conversation-item" + (conv.id === store.activeId ? " active" : "");
+
+					const textWrap = document.createElement("div");
+					textWrap.className = "conversation-text";
+
+					const titleEl = document.createElement("span");
+					titleEl.className = "conversation-title";
+					titleEl.textContent = conv.title || "New conversation";
+
+					const timeEl = document.createElement("span");
+					timeEl.className = "conversation-time";
+					timeEl.textContent = relativeTime(conv.updatedAt);
+
+					textWrap.appendChild(titleEl);
+					textWrap.appendChild(timeEl);
+
+					const delBtn = document.createElement("button");
+					delBtn.type = "button";
+					delBtn.className = "conversation-delete";
+					delBtn.setAttribute("aria-label", "Delete conversation");
+					delBtn.textContent = "×";
+					delBtn.addEventListener("click", function (evt) {
+						evt.stopPropagation();
+						deleteConversation(conv.id);
+					});
+
+					li.appendChild(textWrap);
+					li.appendChild(delBtn);
+					li.addEventListener("click", function () {
+						loadConversation(conv.id);
+					});
+
+					conversationList.appendChild(li);
+				});
+			}
+
+			// --- Message rendering -----------------------------------------------
 
 			function getTimeLabel() {
 				const date = new Date();
@@ -77,30 +235,57 @@
 				return h + ":" + m;
 			}
 
-			function appendMessage(role, text) {
-				const row = document.createElement("article");
-				row.className = "message-row " + (role === "user" ? "message-user" : "message-bot");
+			// Builds the row/avatar/bubble/meta DOM shared by live and replayed
+			// messages. `row` in the returned object is the element that directly
+			// parents `meta` (not the outer article) - renderSources() relies on
+			// that so it can `insertBefore(details, meta)` regardless of the
+			// avatar wrapper around it.
+			function buildMessageDom(role) {
+				const outer = document.createElement("article");
+				outer.className = "message-row " + (role === "user" ? "message-user" : "message-bot");
+
+				const avatar = document.createElement("div");
+				avatar.className = "avatar";
+				avatar.textContent = role === "user" ? "🙂" : "🩺";
+
+				const col = document.createElement("div");
+				col.className = "bubble-col";
 
 				const bubble = document.createElement("div");
 				bubble.className = "bubble";
-				bubble.textContent = text;
 
 				const meta = document.createElement("span");
 				meta.className = "meta";
-				meta.textContent = getTimeLabel();
 
-				row.appendChild(bubble);
-				row.appendChild(meta);
-				messageList.appendChild(row);
+				col.appendChild(bubble);
+				col.appendChild(meta);
+				outer.appendChild(avatar);
+				outer.appendChild(col);
+
+				return { outer: outer, row: col, bubble: bubble, meta: meta };
+			}
+
+			function appendMessage(role, text, time) {
+				const dom = buildMessageDom(role);
+				dom.bubble.textContent = text;
+				dom.meta.textContent = time || getTimeLabel();
+				messageList.appendChild(dom.outer);
 				messageList.scrollTop = messageList.scrollHeight;
+				return dom;
+			}
+
+			function showGreeting() {
+				messageList.innerHTML = "";
+				appendMessage("bot", "Hello. Share your symptoms, duration, and age group for better guidance.");
 			}
 
 			function showTyping() {
-				const typing = document.createElement("article");
-				typing.className = "message-row message-bot";
-				typing.id = "typing-indicator";
-				typing.innerHTML = '<div class="bubble typing"><span></span><span></span><span></span></div>';
-				messageList.appendChild(typing);
+				const dom = buildMessageDom("bot");
+				dom.outer.id = "typing-indicator";
+				dom.meta.remove();
+				dom.bubble.classList.add("typing");
+				dom.bubble.innerHTML = "<span></span><span></span><span></span>";
+				messageList.appendChild(dom.outer);
 				messageList.scrollTop = messageList.scrollHeight;
 			}
 
@@ -110,22 +295,18 @@
 			}
 
 			function createBotMessageRow() {
-				const row = document.createElement("article");
-				row.className = "message-row message-bot";
-
-				const bubble = document.createElement("div");
-				bubble.className = "bubble";
-
-				const meta = document.createElement("span");
-				meta.className = "meta";
-				meta.textContent = getTimeLabel();
-
-				row.appendChild(bubble);
-				row.appendChild(meta);
-				messageList.appendChild(row);
+				const dom = buildMessageDom("bot");
+				dom.meta.textContent = getTimeLabel();
+				messageList.appendChild(dom.outer);
 				messageList.scrollTop = messageList.scrollHeight;
+				return dom;
+			}
 
-				return { row, bubble, meta };
+			function renderStoredMessage(msg) {
+				const dom = appendMessage(msg.role, msg.content, msg.time);
+				if (msg.role === "bot" && msg.sources && msg.sources.length) {
+					renderSources(dom, msg.sources);
+				}
 			}
 
 			// Network chunks don't line up with our marker's byte boundaries, so a
@@ -196,16 +377,126 @@
 				row.row.insertBefore(details, row.meta);
 			}
 
+			// --- Conversation switching -------------------------------------------
+
+			function closeSidebar() {
+				sidebar.classList.remove("open");
+				sidebarBackdrop.classList.remove("show");
+			}
+
+			function openSidebar() {
+				sidebar.classList.add("open");
+				sidebarBackdrop.classList.add("show");
+			}
+
+			function closeSidebarOnMobile() {
+				if (window.matchMedia("(max-width: 700px)").matches) closeSidebar();
+			}
+
+			function renderActiveConversationIntoView() {
+				const convo = getActiveConversation();
+				messageList.innerHTML = "";
+				if (convo && convo.messages.length) {
+					convo.messages.forEach(renderStoredMessage);
+					quickPrompts.style.display = "none";
+				} else {
+					showGreeting();
+					quickPrompts.style.display = "";
+				}
+				messageList.scrollTop = messageList.scrollHeight;
+			}
+
+			function loadConversation(id) {
+				if (sendBtn.disabled) return; // avoid switching away mid-stream
+				if (id === store.activeId) {
+					closeSidebarOnMobile();
+					return;
+				}
+				if (!store.conversations[id]) return;
+
+				store.activeId = id;
+				saveStore();
+				renderActiveConversationIntoView();
+				renderSidebar();
+				closeSidebarOnMobile();
+			}
+
+			function newConversation() {
+				if (sendBtn.disabled) return;
+				store.activeId = null; // lazily persisted on the first sent message
+				saveStore();
+				renderActiveConversationIntoView();
+				renderSidebar();
+				closeSidebarOnMobile();
+				textInput.focus();
+			}
+
+			function deleteConversation(id) {
+				delete store.conversations[id];
+				if (store.activeId === id) {
+					const remaining = Object.values(store.conversations).sort(function (a, b) {
+						return b.updatedAt - a.updatedAt;
+					});
+					store.activeId = remaining.length ? remaining[0].id : null;
+				}
+				saveStore();
+				renderActiveConversationIntoView();
+				renderSidebar();
+			}
+
+			function clearAllConversations() {
+				store = emptyStore();
+				saveStore();
+				renderActiveConversationIntoView();
+				renderSidebar();
+				closeSidebarOnMobile();
+			}
+
+			function persistExchange(conversationId, userMsg, botMsg) {
+				let convo = conversationId ? store.conversations[conversationId] : null;
+
+				if (!convo) {
+					convo = {
+						id: conversationId || makeId(),
+						title: null,
+						createdAt: Date.now(),
+						updatedAt: Date.now(),
+						messages: [],
+					};
+					store.conversations[convo.id] = convo;
+				}
+
+				convo.messages.push(userMsg, botMsg);
+				convo.updatedAt = Date.now();
+				if (!convo.title) {
+					convo.title = deriveTitle(userMsg.content);
+				}
+
+				store.activeId = convo.id;
+				saveStore();
+				renderSidebar();
+			}
+
+			// --- Sending -----------------------------------------------------------
+
 			async function sendMessage(rawText) {
-				appendMessage("user", rawText);
-				const historyForRequest = chatHistory.slice();
-				chatHistory.push({ role: "human", content: rawText });
+				// Captured now, before any awaits, so a completed reply always saves
+				// into the conversation it was actually asked in - even if the user
+				// switches conversations while this request is still streaming.
+				const targetConversationId = store.activeId;
+
+				quickPrompts.style.display = "none";
+
+				const userTime = getTimeLabel();
+				appendMessage("user", rawText, userTime);
+
+				const historyForRequest = historyForActiveConversation();
 
 				showTyping();
 				sendBtn.disabled = true;
 
 				const botRow = createBotMessageRow();
-				botRow.row.style.display = "none"; // hidden until the first token arrives
+				botRow.outer.style.display = "none"; // hidden until the first token arrives
 				let fullText = "";
 				let streamedAny = false;
 
@@ -229,7 +520,7 @@
 
 						if (!streamedAny) {
 							hideTyping();
-							botRow.row.style.display = "";
+							botRow.outer.style.display = "";
 							streamedAny = true;
 						}
 
@@ -239,24 +530,31 @@
 					}
 				} catch (err) {
 					hideTyping();
-					botRow.row.style.display = "";
+					botRow.outer.style.display = "";
 					fullText = fullText || "Network issue detected. Please retry in a few seconds.";
 				} finally {
 					sendBtn.disabled = false;
 				}
 
 				const { answer, sources } = splitAnswerAndSources(fullText);
-				botRow.bubble.textContent = answer || "I could not generate a response.";
+				const answerTime = getTimeLabel();
+				const finalAnswer = answer || "I could not generate a response.";
+				botRow.bubble.textContent = finalAnswer;
+				botRow.meta.textContent = answerTime;
 				renderSources(botRow, sources);
 				messageList.scrollTop = messageList.scrollHeight;
 
-				chatHistory.push({ role: "ai", content: answer });
+				persistExchange(
+					targetConversationId,
+					{ role: "user", content: rawText, time: userTime },
+					{ role: "bot", content: finalAnswer, time: answerTime, sources: sources }
+				);
 			}
 
 			messageArea.addEventListener("submit", async function (event) {
 				event.preventDefault();
 				const rawText = textInput.value.trim();
-				if (!rawText) return;
+				if (!rawText || sendBtn.disabled) return;
 
 				textInput.value = "";
 				await sendMessage(rawText);
@@ -269,7 +567,22 @@
 				});
 			});
 
-			appendMessage("bot", "Hello. Share your symptoms, duration, and age group for better guidance.");
+			newChatBtn.addEventListener("click", newConversation);
+			sidebarToggle.addEventListener("click", function () {
+				if (sidebar.classList.contains("open")) closeSidebar();
+				else openSidebar();
+			});
+			sidebarBackdrop.addEventListener("click", closeSidebar);
+			clearAllBtn.addEventListener("click", function () {
+				if (Object.keys(store.conversations).length === 0) return;
+				if (window.confirm("Delete all saved conversations? This cannot be undone.")) {
+					clearAllConversations();
+				}
+			});
+
+			// --- Init ----------------------------------------------------------------
+			renderSidebar();
+			renderActiveConversationIntoView();
 		</script>
 	</body>
 </html>
